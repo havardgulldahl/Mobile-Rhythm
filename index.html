@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Mobile Rhythm</title>
+        <link rel="stylesheet" href="http://code.jquery.com/mobile/1.0a2/jquery.mobile-1.0a2.min.css">
+        <script src="http://code.jquery.com/jquery-1.4.4.min.js"></script>
+        <script src="http://code.jquery.com/mobile/1.0a2/jquery.mobile-1.0a2.min.js"></script>
+    </head>
+<body>
+
+<div id="start" data-role="page">
+    <div data-role="header">
+        <h1>Rhythmbox running on localhost</h1>
+    </div><!-- /header -->
+
+    <div data-role="content">   
+        <p>
+            <div id="now-playing">
+               <em>Now playing: stopped</em>
+               <div id="control-coverart">
+               </div>
+               <fieldset data-role="fieldcontain">
+                    <label for="control-position">2:44/3:55 </label>
+                    <input type="range" id="control-position" value="0" min="0" max="100">
+               </fieldset>
+               <fieldset data-role="fieldcontain"> 
+                    <div data-role="controlgroup" data-type="horizontal">
+                        <a id="control-prev" data-role="button" data-icon="arrow-l" href="#">Previous</a>
+                        <a id="control-playpause" data-role="button" data-icon="delete" href="#">Stop</a>
+                        <a id="control-next" data-role="button" data-icon="arrow-r" href="#">Next</a>
+                    </div>
+               </fieldset>
+               <fieldset data-role="fieldcontain">
+                    <label for="control-volume">Volume: </label>
+                    <input type="range" id="control-volume" value="0" min="0" max="100">
+               </fieldset>
+            </div>
+            <div id="play-queue">
+                <ol data-role="listview" data-inset="true">
+                </ol>
+            </div>
+        </p>      
+    </div><!-- /content -->
+
+    <div data-role="footer">
+        <div data-role="navbar" data-id="nav" data-position="fixed">
+            <ul>
+                <li><a data-icon="grid" data-transition="slideup" href="#library">Library</a></li>
+                <li><a data-icon="star" data-transition="slideup" href="#playlists">Playlists</a></li>
+                <li><a data-icon="search" data-transition="slideup" href="#search">Search</a></li>
+            </ul>
+        </div><!-- /navbar -->
+    </div><!-- /footer -->
+</div><!-- /page -->
+
+<div id="library" data-role="page">
+    <div data-role="header">
+        <h1>Library</h1>
+    </div><!-- /header -->
+
+    <div data-role="content">   
+        <ul data-role="listview">
+            <li><a href="#genres">Genres</a></li>
+            <li><a href="#artists">Artists</a></li>
+            <li><a href="#albums">Albums</a></li>
+        </ul>
+    </div><!-- /content -->
+
+    <div data-role="footer">
+        <div data-role="navbar" data-id="nav" data-position="fixed">
+            <ul>
+                <li><a data-icon="grid" data-transition="slideup" class="ui-btn-active" href="#">Library</a></li>
+                <li><a data-icon="star" data-transition="slideup" href="#playlists">Playlists</a></li>
+                <li><a data-icon="search" data-transition="slideup" href="#search">Search</a></li>
+            </ul>
+        </div><!-- /navbar -->
+    </div><!-- /footer -->
+</div><!-- /page -->
+
+<div id="genres" data-role="page">
+    <div data-role="header">
+        <h1>Genres</h1>
+    </div><!-- /header -->
+
+    <ul data-role="listview" data-filter="true">
+    </ul>
+</div>
+
+<div id="artists" data-role="page">
+    <div data-role="header">
+        <h1>Artists</h1>
+    </div><!-- /header -->
+
+    <ul data-role="listview" data-filter="true">
+    </ul>
+</div>
+
+<div id="albums" data-role="page">
+    <div data-role="header">
+        <h1>Albums</h1>
+    </div><!-- /header -->
+
+    <ul data-role="listview" data-filter="true">
+    </ul>
+</div>
+
+<div id="playlists" data-role="page">
+    <div data-role="header">
+        <h1>Playlists</h1>
+    </div><!-- /header -->
+
+    <div data-role="content">   
+        <ul data-role="listview" data-filter="true">
+        </ul>
+    </div><!-- /content -->
+
+    <div data-role="footer">
+        <div data-role="navbar" data-id="nav" data-position="fixed">
+            <ul>
+                <li><a data-icon="grid" data-transition="slideup" href="#library">Library</a></li>
+                <li><a data-icon="star" data-transition="slideup" class="ui-btn-active" href="#">Playlists</a></li>
+                <li><a data-icon="search" data-transition="slideup" href="#search">Search</a></li>
+            </ul>
+        </div><!-- /navbar -->
+    </div><!-- /footer -->
+</div><!-- /page -->
+
+<div id="search" data-role="page">
+    <div data-role="header">
+        <h1>Find music</h1>
+    </div><!-- /header -->
+
+    <div data-role="content">   
+        <form>
+            <input id="search-input" type="search" value="Search for music by genre, artist, album or song title">
+            <ul id="search-result" data-role="listview" data-inset="true">
+            </ul>
+        </form>
+    </div><!-- /content -->
+
+    <div data-role="footer">
+        <div data-role="navbar" data-id="nav" data-position="fixed">
+            <ul>
+                <li><a data-icon="grid" data-transition="slideup" href="#library">Library</a></li>
+                <li><a data-icon="star" data-transition="slideup" href="#playlists">Playlists</a></li>
+                <li><a data-icon="search" data-transition="slideup" class="ui-btn-active" href="#">Search</a></li>
+            </ul>
+        </div><!-- /navbar -->
+    </div><!-- /footer -->
+</div><!-- /page -->
+
+<div id="page-template" data-role="page" style="display:none">
+    <div data-role="header">
+        <h1>Page Title</h1>
+    </div><!-- /header -->
+
+    <div data-role="content">   
+        <p>Page content goes here.</p>      
+    </div><!-- /content -->
+
+    <div data-role="footer">
+        <div data-role="navbar" data-id="nav" data-position="fixed">
+            <ul>
+                <li><a data-icon="grid" data-transition="slideup" href="#library">Library</a></li>
+                <li><a data-icon="star" data-transition="slideup" href="#playlists">Playlists</a></li>
+                <li><a data-icon="search" data-transition="slideup" href="#search">Search</a></li>
+            </ul>
+        </div><!-- /navbar -->
+    </div><!-- /footer -->
+</div><!-- /page -->
+
+</body>
+</html>

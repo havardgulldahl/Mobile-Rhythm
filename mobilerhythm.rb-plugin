@@ -1,0 +1,10 @@
+[RB Plugin]
+Loader=python
+Module=mobilerhytm
+IAge=1
+Name=Mobilerhytm
+Description=Remote control your player from your mobile device (web interface)
+Authors=Havard Gulldahl <havard@gulldahl.no>
+Copyright=Copyright © 2010 Havard Gulldahl
+Website=https://github.com/havardgulldahl/Mobile-Rhythm
+
