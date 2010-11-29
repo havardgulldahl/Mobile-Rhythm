@@ -5,6 +5,6 @@ IAge=1
 Name=Mobilerhythm
 Description=Remote control your player from your mobile device (web interface)
 Authors=Havard Gulldahl <havard@gulldahl.no>
-Copyright=Copyright © 2010 Havard Gulldahl, 2007 Michael Gratton. GPL2+ licenced
+Copyright=Copyright © 2010 Havard Gulldahl, 2007 Michael Gratton, 2010 David Arthur. See LICENSE.
 Website=https://github.com/havardgulldahl/Mobile-Rhythm
 

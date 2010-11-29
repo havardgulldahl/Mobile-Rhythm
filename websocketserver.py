@@ -134,6 +134,9 @@ def SetupWebSocket(host, port):
     asyncore.loop()
     return server
 
+def process_websocket(loop):
+    asyncore.loop(timeout=3, count=loop)
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
     server = SetupWebSocket("localhost", 9004) 
