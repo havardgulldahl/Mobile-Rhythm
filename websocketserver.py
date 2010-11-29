@@ -1,3 +1,10 @@
+# -*- encoding: utf8 -*-
+#
+# Simple WebSockets in Python
+# By David Arthur ( http://github.com/mumrah )
+# Source https://gist.github.com/512987
+#
+
 import struct
 import socket
 import hashlib
@@ -6,6 +13,7 @@ from select import select
 import re
 import logging
 import signal
+import asyncore
 
 class WebSocket(object):
     handshake = (
@@ -92,9 +100,10 @@ class WebSocket(object):
     def close(self):
         self.client.close()      
 
-class WebSocketServer(object):
+class WebSocketServer(asyncore.dispatcher):
     def __init__(self, bind, port, cls=WebSocket):
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        asyncore.dispatcher.__init__(self)
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.bind((bind, port))
         self.bind = bind
         self.port = port
