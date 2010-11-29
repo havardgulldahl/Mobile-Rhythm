@@ -1,10 +1,46 @@
 <!DOCTYPE html>
 <html>
     <head>
+        <meta charset="utf-8">
         <title>Mobile Rhythm</title>
         <link rel="stylesheet" href="http://code.jquery.com/mobile/1.0a2/jquery.mobile-1.0a2.min.css">
         <script src="http://code.jquery.com/jquery-1.4.4.min.js"></script>
         <script src="http://code.jquery.com/mobile/1.0a2/jquery.mobile-1.0a2.min.js"></script>
+        <script>
+
+$(function() {
+var ws = new WebSocket("ws://localhost:9004/");
+ws.onopen = function() {
+      ws.send("Hello Mr. Server!");
+};
+ws.onmessage = function (e) { player.parse(e.data); };
+ws.onclose = function() { };
+
+var player = {
+    play: function() { ws.send("player:play"); },
+    pause: function() { ws.send("player:pause"); },
+    previous: function() { ws.send("player:previous"); },
+    next: function() { ws.send("player:next"); },
+    seek: function(offset) { ws.send("player:seek:"+parseInt(offset, 10)); },
+    volume: function(offset) { ws.send("player:volume:"+parseInt(offset, 10)); },
+    parse: function(data) {
+        console.debug("Got data from websocket: %o", data);
+    }
+};
+
+$("#control-playpause").toggle(function(playev) {
+    player.play();
+}, function(pauseev) {
+    player.pause();
+});
+$("#control-prev").click(function(ev) { player.previous(); });
+$("#control-next").click(function(ev) { player.next(); });
+$("#control-seek").change(function(ev) { player.seek(this.value); });
+$("#control-volume").change(function(ev) { player.volume(this.value); });
+
+});
+
+        </script>
     </head>
 <body>
 
@@ -20,8 +56,8 @@
                <div id="control-coverart">
                </div>
                <fieldset data-role="fieldcontain">
-                    <label for="control-position">2:44/3:55 </label>
-                    <input type="range" id="control-position" value="0" min="0" max="100">
+                    <label id="control-position" for="control-seek">2:44/3:55</label>
+                    <input type="range" id="control-seek" value="0" min="0" max="1000">
                </fieldset>
                <fieldset data-role="fieldcontain"> 
                     <div data-role="controlgroup" data-type="horizontal">
