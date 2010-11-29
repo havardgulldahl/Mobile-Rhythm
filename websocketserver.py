@@ -1,21 +1,22 @@
 # -*- encoding: utf8 -*-
 #
 # Simple WebSockets in Python
-# By David Arthur ( http://github.com/mumrah )
-# Source https://gist.github.com/512987
+# By Håvard Gulldahl <havard@gulldahl.no>
+# GPL2+
+# Based on example by David Arthur
+# https://gist.github.com/512987
 #
 
 import struct
 import socket
 import hashlib
 import sys
-from select import select
 import re
 import logging
 import signal
 import asyncore
 
-class WebSocket(object):
+class WebSocket(asyncore.dispatcher_with_send):
     handshake = (
         "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
         "Upgrade: WebSocket\r\n"
@@ -26,14 +27,24 @@ class WebSocket(object):
         "Sec-Websocket-Location: ws://%(bind)s:%(port)s/\r\n"
         "\r\n"
     )
-    def __init__(self, client, server):
+    handshaken = False
+    header = ""
+    data = ""
+
+    def _init__(self, client, server):
+        asyncore.dispatcher_with_send.__init__(self)
         self.client = client
         self.server = server
         self.handshaken = False
         self.header = ""
         self.data = ""
-        
-    def feed(self, data):
+
+    def set_server(self, server):
+        self.server = server
+
+    def handle_read(self):
+        logging.info("Getting data from client")
+        data = self.recv(1024)
         if not self.handshaken:
             self.header += data
             if self.header.find('\r\n\r\n') != -1:
@@ -85,9 +96,9 @@ class WebSocket(object):
             logging.warning("Not using challenge + response")
             handshake = WebSocket.handshake
         handshake = handshake % {'origin': origin, 'port': self.server.port, 
-                                    'bind': self.server.bind}
+                                    'bind': self.server.socketbind}
         logging.debug("Sending handshake %s" % handshake)   
-        self.client.send(handshake)
+        self.out_buffer = handshake
         return True
                      
     def onmessage(self, data):
@@ -95,61 +106,40 @@ class WebSocket(object):
 
     def send(self, data):
         logging.info("Sent message: %s" % data)
-        self.client.send("\x00%s\xff" % data)
-        
-    def close(self):
-        self.client.close()      
+        self.out_buffer = "\x00%s\xff" % data
 
 class WebSocketServer(asyncore.dispatcher):
     def __init__(self, bind, port, cls=WebSocket):
         asyncore.dispatcher.__init__(self)
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.bind((bind, port))
-        self.bind = bind
         self.port = port
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.bind((bind, port))
+        self.socketbind = bind
         self.cls = cls
         self.connections = {}
-        self.listeners = [self.socket]
-            
-    def listen(self, backlog=5):
-        self.socket.listen(backlog)
+        self.listen(5)
         logging.info("Listening on %s" % self.port)
         self.running = True
-        while self.running:
-            rList, wList, xList = select(self.listeners, [], self.listeners, 1)
-            for ready in rList:
-                if ready == self.socket:
-                    logging.debug("New client connection")
-                    client, address = self.socket.accept()
-                    fileno = client.fileno()
-                    self.listeners.append(fileno)
-                    self.connections[fileno] = self.cls(client, self)
-                else:
-                    logging.debug("Client ready for reading %s" % ready)
-                    client = self.connections[ready].client
-                    data = client.recv(1024)
-                    fileno = client.fileno()
-                    if data:
-                        self.connections[fileno].feed(data)
-                    else:
-                        logging.debug("Closing client %s" % ready)
-                        self.connections[fileno].close()
-                        del self.connections[fileno]
-                        self.listeners.remove(ready)
-            for failed in xList:
-                if failed == self.socket:
-                    logging.error("Socket broke")
-                    for fileno, conn in self.connections:
-                        conn.close()
-                    self.running = False
+
+    def handle_accept(self):
+        logging.debug("New client connection")
+        client, address = self.accept()
+        fileno = client.fileno()
+        self.connections[fileno] = self.cls(client)
+        self.connections[fileno].set_server(self)
+
+def SetupWebSocket(host, port):
+    logging.info("Starting WebSocketServer on %s, port %s", host, port)
+    server = WebSocketServer("localhost", 9004) 
+    asyncore.loop()
+    return server
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-    server = WebSocketServer("localhost", 9004) 
-    server.listen()
-    # Add SIGINT handler for killing the server
+    server = SetupWebSocket("localhost", 9004) 
     def signal_handler(signal, frame):
         logging.info("Caught Ctrl+C, shutting down...")
         server.running = False
+        server.close()
         sys.exit()
     signal.signal(signal.SIGINT, signal_handler)
