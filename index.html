@@ -35,8 +35,13 @@ var port = window.location.port ? (parseInt(window.location.port, 10) + 1) : 900
 console.log("ws://"+window.location.hostname+":"+port+"/");
 ws = new WebSocket("ws://"+window.location.hostname+":"+port+"/");
 window.setInterval(function() {
-$("#now-playing em").text(ws.readyState);
-}, 500);
+    switch(ws.readyState) {
+        case 0: var c = "white"; break;
+        case 1: var c = "green"; break;
+        default: var c = "red"; break;
+    }
+    $("#conn-status").css("background-color", c);
+}, 1000);
 ws.onopen = function() {
     console.log("wsocket opened");
       ws.send("Hello Mr. Server!");
@@ -55,8 +60,20 @@ var player = {
     next: function() { ws.sendcmd('player','next'); },
     seek: function(offset) { ws.sendcmd('player','seek', parseInt(offset, 10)); },
     volume: function(offset) { ws.sendcmd('player','volume', parseInt(offset, 10)); },
+    update_status: function(action, args) { 
+        console.debug("updating now playing: %o", args);
+        $("#now-playing em")
+            .text("Now playing: " + args.artist + " - " + args.album + " - " + args.title)
+            .data(args.eid);
+    },
     parse: function(data) {
         console.debug("Got data from websocket: %o", data);
+        var msg = JSON.parse(data);
+        switch(msg.domain) {
+            case "player": 
+                player.update_status(msg.action, msg.args);
+                break;
+        }
     }
 };
 
@@ -83,6 +100,7 @@ $("#control-volume").change(function(ev) { player.volume(this.value); });
 
     <div data-role="content">   
         <p>
+            <div id="conn-status" style="width:50px; height:50px; background-color: #ccc"></div>
             <div id="now-playing">
                <em>Now playing: stopped</em>
                <div id="control-coverart">

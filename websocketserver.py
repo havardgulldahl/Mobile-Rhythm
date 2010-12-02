@@ -32,17 +32,17 @@ class WebSocket(object):#asyncore.dispatcher_with_send):
     data = ""
     server = None
 
-    def __init__(self, client, bindinfo, server):
+    def __init__(self, client, bindinfo):
         #asyncore.dispatcher_with_send.__init__(self)
         self.client = client
         self.bindinfo = bindinfo
-        self.server = server
         self.handshaken = False
         self.header = ""
+        self.addr = ':'.join((str(s) for s in bindinfo))
         self.data = ""
 
     def readsock(self, *args):
-        logging.warning("Getting data from client: %s", (self.bindinfo))
+        #logging.warning("Getting data from client: %s", (self.bindinfo))
         data = self.client.recv(1024)
         if not self.handshaken:
             self.header += data
@@ -59,7 +59,8 @@ class WebSocket(object):#asyncore.dispatcher_with_send):
             self.data = msgs.pop()
             for msg in msgs:
                 if msg[0] == '\x00':
-                    self.onmessage(msg[1:]) 
+                    #self.onmessage(msg[1:]) 
+                    self.onmessage(msg) 
         return True
                     
     def dohandshake(self, header, key=None): 
@@ -95,6 +96,8 @@ class WebSocket(object):#asyncore.dispatcher_with_send):
         else:
             logging.warning("Not using challenge + response")
             handshake = WebSocket.handshake
+        #logging.warning("loading template: %s (%s), %s (%s), %s (%s)", origin, type(origin), self.bindinfo[1],
+        #type(self.bindinfo[1]), self.bindinfo[0], type(self.bindinfo[0]))
         handshake = handshake % {'origin': origin, 'port': self.bindinfo[1],
                                     'bind': self.bindinfo[0] }
         logging.warning("Sending handshake %s" % handshake)   
@@ -136,17 +139,14 @@ class WebSocketServer(object):#asyncore.dispatcher):
         if self.connection_callback is not None:
             self.connection_callback(self.connections[fileno])
 
-def SetupWebSocket(host, port):
-    logging.info("Starting WebSocketServer on %s, port %s", host, port)
-    server = WebSocketServer(host, port)
-    #asyncore.loop()
-    return server
+def make_websocketserver(hostname, port):
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((hostname, port))
+    sock.listen(1)
+    logging.warning("simple websockserver upat port %s:%s", hostname, port)
+    return sock
 
-def process_websocket(loop):
-    logging.warning("Running asyncore loop %i times", loop)
-    #asyncore.loop(timeout=3, count=loop)
-    #asyncore.poll(0.001)
-    #asyncore.loop(timeout=1, count=loop)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")

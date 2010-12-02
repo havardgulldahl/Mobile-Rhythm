@@ -44,7 +44,7 @@ import gobject
 import rb
 import rhythmdb
 
-from websocketserver import WebSocket, WebSocketServer, process_websocket
+from websocketserver import WebSocket, make_websocketserver
 
 # try to load avahi, don't complain if it fails
 try:
@@ -186,28 +186,6 @@ def make_webserver(hostname, port):
     logging.warning("simple webserver up at port #%i", port)
     return httpd
 
-def make_websockserver(hostname, port, main):
-    sock = socket.socket()
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((hostname, port))
-    sock.listen(1)
-    logging.warning("simple websockserver upat port %s:%s", hostname, port)
-    #main.register_websockserver(sock)
-    gobject.io_add_watch(sock, gobject.IO_IN, websocklistener, main)
-
-def websocklistener(sock, iotype, main):
-    '''Asynchronous connection listener. Starts a handler for each connection.'''
-    logging.warning("Got incoming")
-    conn, addr = sock.accept()
-    logging.warning("Connected to %s" , addr)
-    L = WebSocket(conn, sock.getsockname(), main)
-    logging.warning("Created new websockclient: %s", L)
-    #L.set_server(sock)
-    #main.register_websockclient(L)
-    gobject.io_add_watch(conn, gobject.IO_IN, L.readsock)
-    #gobject.io_add_watch(conn, gobject.IO_IN, handler)
-    return True
-
 class MobileRhythmServer(object):
 
     def __init__(self, hostname, port, plugin):
@@ -219,24 +197,28 @@ class MobileRhythmServer(object):
         self.stream = None
         self.duration = None
         self.eid      = None
+        self._watchlist = []
         self._wsbuffer = cStringIO.StringIO()
         self._httpd = make_webserver(hostname, port)
-        self._watch_httpd_id = gobject.io_add_watch(self._httpd.socket,
+        self._watchlist.append(gobject.io_add_watch(self._httpd.socket,
                                                     gobject.IO_IN,
-                                                    self._idle_httpd_cb)
+                                                    self._idle_httpd_cb))
         if not hostname:
             hostname = "localhost"
-        #self.websocket = WebSocketServer(hostname, port+1, conn_cb=self._ws_new_client) 
-        self.websocket = make_websockserver(hostname, port+1, self)
+        self.websocket = make_websocketserver(hostname, port+1)
+        self._watchlist.append(gobject.io_add_watch(self.websocket, gobject.IO_IN, self.websocklistener))
         self._websockets = {}
-        self._watched_clients = []
-        #self._watch_websocket_id = gobject.timeout_add(200, self._idle_websocket_cb)
-        #self._watch_websocket_id = gobject.idle_add(self._idle_websocket_cb)
-        #self._watch_websocket_id = gobject.io_add_watch(self.websocket.socket,
-        #     gobject.IO_IN | gobject.IO_OUT | gobject.IO_PRI | gobject.IO_ERR | gobject.IO_HUP,
-        #                                         self._idle_websocket_cb,
-        #                                         priority=gobject.PRIORITY_HIGH_IDLE)
-        #self._update_websocket_id = gobject.timeout_add(5000, self._ws_update)
+
+    def websocklistener(self, sock, *args):
+        '''Asynchronous connection listener. Starts a handler for each connection.'''
+        logging.warning("Got incoming")
+        conn, addr = sock.accept()
+        logging.warning("Connected to %s" , addr)
+        L = WebSocket(conn, sock.getsockname())
+        logging.warning("Created new websockclient: %s", L)
+        self.register_client(L)
+        self._watchlist.append(gobject.io_add_watch(conn, gobject.IO_IN, L.readsock))
+        return True
 
     def register_client(self, client):
         logging.warning("new client! %s" , client)
@@ -244,15 +226,11 @@ class MobileRhythmServer(object):
         client.writable = self._ws_check_pending
         client.handle_write = self._ws_push
         client.handle_error = self._ws_error
-        self._websockets[client.fileno()] = client
-        self._watched_clients.append(gobject.io_add_watch(client,
-                                                          gobject.IO_IN | gobject.IO_OUT,
-                                                          self._idle_websocket_cb2))
-
+        self._websockets[client.addr] = client
 
     def shutdown(self):
-        gobject.source_remove(self._watch_httpd_id)
-        gobject.source_remove(self._watch_websocket_id)
+        for z in self._watchlist:
+            gobject.source_remove(z)
         self.running = False
         self.plugin = None
 
@@ -264,9 +242,14 @@ class MobileRhythmServer(object):
         self.duration = duration
         self.eid = eid
 
-    def _send(self, data):
-        #self.websocket.send(json.dumps(data))
-        self._wsbuffer.write(json.dumps(data))
+    def _send(self, data, receiver=None):
+        d = json.dumps(data)
+        if receiver is None: # send to all
+            for z in self._websockets.values():
+                z.send(d)
+        else:
+            self._websockets[receiver].send(d)
+        #self._wsbuffer.write(json.dumps(data))
 
     def _ws_check_pending(self):
         i =  len(self._wsbuffer.getvalue()) 
@@ -286,7 +269,9 @@ class MobileRhythmServer(object):
 
     def _ws_update(self):
         logging.warning("sending update")
-        self._send({"playing": {"artist": self.artist,
+        self._send({"domain":"player",
+                    "action":"playing",
+                    "args": { "artist": self.artist,
                                 "album": self.album,
                                 "title": self.title,
                                 "stream": self.stream,
@@ -303,35 +288,14 @@ class MobileRhythmServer(object):
         self._httpd.handle_request()
         return True
 
-    def _idle_websocket_cb(self, source=None, cb_condition=None):
-        if not self.running:
-            return False
-        logging.warning(source)
-        logging.warning(cb_condition)
-        gtk.gdk.threads_enter()
-        logging.warning("processing websocket")
-        process_websocket(5) 
-        gtk.gdk.threads_leave()
-        return True
-
-    def _idle_websocket_cb2(self, source=None, cb_condition=None):
-        if not self.running:
-            return False
-        if source.closed():
-            return False
-        gtk.gdk.threads_enter()
-        logging.warning("processing websocket client")
-        process_websocket(3) 
-        gtk.gdk.threads_leave()
-        return True
-
     def _wsmessage(self, data):
-        message = json.loads(data)
         logging.warning("Got data: %s" % data)
-        self.websocket.send("Got data: %s" % data)
-        sys.stdout.write("got d: %s" % data)
-        domain, action, args = message.split(":")
-        if action == 'play':		
+        try:
+            message = json.loads(data)
+        except Exception, (e):
+            logging.exception(e)
+            return False
+        if message.action == 'play':		
             if not player.get_playing():
                 if not player.get_playing_source():
                     return self._play_entry(args)
@@ -339,29 +303,29 @@ class MobileRhythmServer(object):
                     return self._play(args)
             else:
                 return self._pause(args)
-        elif action == 'pause':
+        elif message.action == 'pause':
             player.pause()
-        elif action == 'play-entry':
+        elif message.action == 'play-entry':
             return self._play_entry(args)
-        elif action == 'next':
+        elif message.action == 'next':
             player.do_next()
-        elif action == 'prev':
+        elif message.action == 'prev':
             player.do_previous()
-        elif action == 'stop':
+        elif message.action == 'stop':
             player.stop()
-        elif action == 'set-vol':
+        elif message.action == 'set-vol':
             return self._setvolume(args)
-        elif action == 'get-vol':
+        elif message.action == 'get-vol':
             return self._getvolume(args)
-        elif action == 'vol-up':
+        elif message.action == 'vol-up':
             player.set_volume(player.get_volume() + 0.1)
-        elif action == 'vol-down':
+        elif message.action == 'vol-down':
             player.set_volume(player.get_volume() - 0.1)
-        elif action == 'get-playlist':
+        elif message.action == 'get-playlist':
             return self._make_playlist()
-        elif action == 'get-playing':
+        elif message.action == 'get-playing':
             return self._getplaying()
-        elif action == 'set-play-time':
+        elif message.action == 'set-play-time':
             return self._setplaypos(args)
 
     def _make_playlist(self):
@@ -373,7 +337,9 @@ class MobileRhythmServer(object):
 
         playlist_rows = self._player_search(libquery)
         if playlist_rows.get_size() == 0:
-            return self._send({"playlist":[]})
+            return self._send({"domain":"playlist",
+                                "action" "playlist"
+                                "args" :[]})
         playlist = []
         for row in playlist_rows:
             entry = row[0]
@@ -387,7 +353,9 @@ class MobileRhythmServer(object):
                     "genre":db.entry_get(entry, rhythmdb.PROP_GENRE),
             }
             playlist.append(item)
-        self._send({"playlist":playlist})
+        self._send({"domain":"playlist",
+                    "action" "playlist"
+                    "args" :playlist})
 
     def _player_search(self, search):
         #"""perform a player search"""
@@ -405,17 +373,17 @@ class MobileRhythmServer(object):
 
     def _getvolume(self):
         player = self.plugin.player
-        self._send({"current_vol":player.get_volume()})
+        self._send({"domain":"player", "action": "current_vol", "args":player.get_volume()})
 
     def _pause(self):
         player = self.plugin.player
         player.pause()
-        self._send({"pause":True})
+        self._send({"domain":"player", "action": "pause", "args":True})
 
     def _play(self):
         player = self.plugin.player
         player.play()
-        self._send({"playing":True})
+        self._getplaying()
 
     def _play_entry(self, args):
         player = self.plugin.player
@@ -425,7 +393,7 @@ class MobileRhythmServer(object):
         sys.stdout.write('location value received : %s' %params['location'][0])
         sys.stdout.write('entry title: %s' % db.entry_get(pentry, rhythmdb.PROP_ARTIST))
         player.play_entry(pentry)
-        self._send({"playing":True})
+        self._getplaying()
 
     def _setplaypos(self, position):
         player = self.plugin.player
@@ -434,7 +402,8 @@ class MobileRhythmServer(object):
 
     def _getplaypos(self):
         player = self.plugin.player
-        self._send({"playtime":player.get_playing_time()})
+        #self._send({"domain":"player", "action":"playtime", "args":player.get_playing_time()})
+        self._send({"domain":"player", "action":"playpos", "args":player.get_playing_time()})
 
     def _getplaying(self):
         player = self.plugin.player
@@ -445,7 +414,7 @@ class MobileRhythmServer(object):
                 playing[z] = getattr(self, z)
             if self.stream:
                 playing["stream"] = self.stream
-        self._send({"current":playing})
+        self._send({"domain":"player", "action": "playing", "args":playing})
 
     def _handle_stock(self, environ, response):
         path = environ['PATH_INFO']
