@@ -3,7 +3,7 @@
 #
 # Mobile Rhythm - web interface to Rhythmbox for mobile devices
 # Copyright (C) 2007 Michael Gratton.
-# Parts copyright (C) 2010 Håvard Gulldahl
+# Copyright (C) 2010 Håvard Gulldahl
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@ import sys
 import time
 import json
 import asyncore
+import logging
 
 def getfqdn(name=''):
       return name
@@ -35,8 +36,7 @@ import socket
 socket.getfqdn=getfqdn
 
 import math
-from wsgiref.simple_server import WSGIRequestHandler
-from wsgiref.simple_server import make_server
+import BaseHTTPServer
 
 import gtk
 import gobject
@@ -44,7 +44,7 @@ import gobject
 import rb
 import rhythmdb
 
-from websocketserver import SetupWebSocket, WebSocketServer, process_websocket
+from websocketserver import WebSocket, WebSocketServer, process_websocket
 
 # try to load avahi, don't complain if it fails
 try:
@@ -56,6 +56,8 @@ except:
 
 
 class MobileRhythmPlugin(rb.Plugin):
+    entrygroup = None
+    server = None
 
     def __init__(self):
         super(MobileRhythmPlugin, self).__init__()
@@ -142,6 +144,8 @@ class MobileRhythmPlugin(rb.Plugin):
             self._update_entry(entry)
 
     def _update_entry(self, entry):
+        if not self.server:
+            return
         if entry:
             artist   = self.db.entry_get(entry, rhythmdb.PROP_ARTIST)
             album    = self.db.entry_get(entry, rhythmdb.PROP_ALBUM)
@@ -164,9 +168,45 @@ class MobileRhythmPlugin(rb.Plugin):
                             entry_request_extra_metadata(entry,
                                                          'rb:stream-song-album')
             self.server.set_playing(artist, album, title, stream,duration,eid)
+            self.server._ws_update()
         else:
             self.server.set_playing(None, None, None, None,None,None)
 
+class SimpleWebServer(BaseHTTPServer.BaseHTTPRequestHandler):
+    server_version = "Mobile Rhythm Web Gui"
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(open(resolve_path("index.html")).read())
+
+def make_webserver(hostname, port):
+    httpd = BaseHTTPServer.HTTPServer((hostname, port), SimpleWebServer)
+    httpd.allow_reuse_address = 1
+    httpd.timeout = 2000
+    logging.warning("simple webserver up at port #%i", port)
+    return httpd
+
+def make_websockserver(hostname, port, main):
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((hostname, port))
+    sock.listen(1)
+    logging.warning("simple websockserver upat port %s:%s", hostname, port)
+    #main.register_websockserver(sock)
+    gobject.io_add_watch(sock, gobject.IO_IN, websocklistener, main)
+
+def websocklistener(sock, iotype, main):
+    '''Asynchronous connection listener. Starts a handler for each connection.'''
+    logging.warning("Got incoming")
+    conn, addr = sock.accept()
+    logging.warning("Connected to %s" , addr)
+    L = WebSocket(conn, sock.getsockname(), main)
+    logging.warning("Created new websockclient: %s", L)
+    #L.set_server(sock)
+    #main.register_websockclient(L)
+    gobject.io_add_watch(conn, gobject.IO_IN, L.readsock)
+    #gobject.io_add_watch(conn, gobject.IO_IN, handler)
+    return True
 
 class MobileRhythmServer(object):
 
@@ -179,17 +219,36 @@ class MobileRhythmServer(object):
         self.stream = None
         self.duration = None
         self.eid      = None
-        self.socket   = None
-        self._httpd = make_server(hostname, port, self._wsgi,
-                                  handler_class=LoggingWSGIRequestHandler)
+        self._wsbuffer = cStringIO.StringIO()
+        self._httpd = make_webserver(hostname, port)
         self._watch_httpd_id = gobject.io_add_watch(self._httpd.socket,
-                                                 gobject.IO_IN,
-                                                 self._idle_httpd_cb)
-        self._websocket = WebSocketServer(hostname, port+1) 
-        self._websocket.onmessage = self._wsmessage
-        self._watch_websocket_id = gobject.io_add_watch(self._websocket.socket,
-                                                 gobject.IO_IN,
-                                                 self._idle_websocket_cb)
+                                                    gobject.IO_IN,
+                                                    self._idle_httpd_cb)
+        if not hostname:
+            hostname = "localhost"
+        #self.websocket = WebSocketServer(hostname, port+1, conn_cb=self._ws_new_client) 
+        self.websocket = make_websockserver(hostname, port+1, self)
+        self._websockets = {}
+        self._watched_clients = []
+        #self._watch_websocket_id = gobject.timeout_add(200, self._idle_websocket_cb)
+        #self._watch_websocket_id = gobject.idle_add(self._idle_websocket_cb)
+        #self._watch_websocket_id = gobject.io_add_watch(self.websocket.socket,
+        #     gobject.IO_IN | gobject.IO_OUT | gobject.IO_PRI | gobject.IO_ERR | gobject.IO_HUP,
+        #                                         self._idle_websocket_cb,
+        #                                         priority=gobject.PRIORITY_HIGH_IDLE)
+        #self._update_websocket_id = gobject.timeout_add(5000, self._ws_update)
+
+    def register_client(self, client):
+        logging.warning("new client! %s" , client)
+        client.onmessage = self._wsmessage
+        client.writable = self._ws_check_pending
+        client.handle_write = self._ws_push
+        client.handle_error = self._ws_error
+        self._websockets[client.fileno()] = client
+        self._watched_clients.append(gobject.io_add_watch(client,
+                                                          gobject.IO_IN | gobject.IO_OUT,
+                                                          self._idle_websocket_cb2))
+
 
     def shutdown(self):
         gobject.source_remove(self._watch_httpd_id)
@@ -204,15 +263,35 @@ class MobileRhythmServer(object):
         self.stream = stream
         self.duration = duration
         self.eid = eid
-        self._send({"playing": {"artist": artist,
-                                "album": album,
-                                "title": title,
-                                "stream": stream,
-                                "duration": duration,
-                                "eid": eid}})
 
     def _send(self, data):
-        self._websocket.send(json.dumps(data))
+        #self.websocket.send(json.dumps(data))
+        self._wsbuffer.write(json.dumps(data))
+
+    def _ws_check_pending(self):
+        i =  len(self._wsbuffer.getvalue()) 
+        logging.warning("Check pending: %i" % i)
+        return i > 0
+
+    def _ws_push(self):
+        logging.warning("pushing buffer")
+        buf = self._wsbuffer.getvalue()
+        self._wsbuffer.seek(0)
+        self._wsbuffer.truncate()
+        self.websocket.send(buf)
+
+    def _ws_error(self, errtype=None, value=None, traceback=None):
+        logging.warning("WebSocket Exception: %s %s", errtype, value)
+        logging.exception(traceback)
+
+    def _ws_update(self):
+        logging.warning("sending update")
+        self._send({"playing": {"artist": self.artist,
+                                "album": self.album,
+                                "title": self.title,
+                                "stream": self.stream,
+                                "duration": self.duration,
+                                "eid": self.eid}})
 
     def _open(self, filename):
         filename = os.path.join(os.path.dirname(__file__), filename)
@@ -224,25 +303,33 @@ class MobileRhythmServer(object):
         self._httpd.handle_request()
         return True
 
-    def _idle_websocket_cb(self, source, cb_condition):
+    def _idle_websocket_cb(self, source=None, cb_condition=None):
         if not self.running:
             return False
-        process_websocket(10) 
+        logging.warning(source)
+        logging.warning(cb_condition)
+        gtk.gdk.threads_enter()
+        logging.warning("processing websocket")
+        process_websocket(5) 
+        gtk.gdk.threads_leave()
         return True
 
-    def _wsgi(self, environ, response):
-        path = environ['PATH_INFO']
-        if path in ('/', ''):
-            return self._handle_interface(environ, response)
-        elif path.startswith('/stock/'):
-            return self._handle_stock(environ, response)
-        elif path.startswith('/get-xml-pl/'):		
-            return self._make_playlist_xml(response)
-        else:
-            return self._handle_static(environ, response)
+    def _idle_websocket_cb2(self, source=None, cb_condition=None):
+        if not self.running:
+            return False
+        if source.closed():
+            return False
+        gtk.gdk.threads_enter()
+        logging.warning("processing websocket client")
+        process_websocket(3) 
+        gtk.gdk.threads_leave()
+        return True
 
     def _wsmessage(self, data):
         message = json.loads(data)
+        logging.warning("Got data: %s" % data)
+        self.websocket.send("Got data: %s" % data)
+        sys.stdout.write("got d: %s" % data)
         domain, action, args = message.split(":")
         if action == 'play':		
             if not player.get_playing():
@@ -426,30 +513,6 @@ class MobileRhythmServer(object):
             response('404 Not Found', response_headers)
             return 'File not found: %s' % rpath
 
-
-class LoggingWSGIRequestHandler(WSGIRequestHandler):
-
-    def log_message(self, format, *args):
-        # RB redirects stdout to its logging system, to these
-        # request log messages, run RB with -D rhythmweb
-        sys.stdout.write("%s - - [%s] %s\n" %
-                         (self.address_string(),
-                          self.log_date_time_string(),
-                          format%args))
-
-
-def parse_post(environ):
-    if 'CONTENT_TYPE' in environ:
-        length = -1
-        if 'CONTENT_LENGTH' in environ:
-            length = int(environ['CONTENT_LENGTH'])
-        #if environ['CONTENT_TYPE'] == 'application/x-www-form-urlencoded':
-        #    return cgi.parse_qs(environ['wsgi.input'].read(length))
-        if environ['CONTENT_TYPE'] == 'multipart/form-data':
-            return cgi.parse_multipart(environ['wsgi.input'].read(length))
-	else:
-	    return cgi.parse_qs(environ['wsgi.input'].read(length))
-    return None
 
 def return_redirect(path, environ, response):
     if not path.startswith('/'):

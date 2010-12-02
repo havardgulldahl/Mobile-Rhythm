@@ -28,21 +28,33 @@ with this program; if not, write to the Free Software Foundation, Inc.,
         <script src="http://code.jquery.com/mobile/1.0a2/jquery.mobile-1.0a2.min.js"></script>
         <script>
 
+var ws;
 $(function() {
-var ws = new WebSocket("ws://localhost:9004/");
+
+var port = window.location.port ? (parseInt(window.location.port, 10) + 1) : 9004;
+console.log("ws://"+window.location.hostname+":"+port+"/");
+ws = new WebSocket("ws://"+window.location.hostname+":"+port+"/");
+window.setInterval(function() {
+$("#now-playing em").text(ws.readyState);
+}, 500);
 ws.onopen = function() {
+    console.log("wsocket opened");
       ws.send("Hello Mr. Server!");
 };
 ws.onmessage = function (e) { player.parse(e.data); };
-ws.onclose = function() { };
+ws.onclose = function() { console.warn("WebSocket closed"); };
+ws.onerror = function(e) { console.error("WebSocket error! %o", e); };
+ws.sendcmd = function(domain, cmd, args) { 
+    this.send(JSON.stringify({"domain":domain, "command": cmd, "args": args}));
+}
 
 var player = {
-    play: function() { ws.send("player:play"); },
-    pause: function() { ws.send("player:pause"); },
-    previous: function() { ws.send("player:previous"); },
-    next: function() { ws.send("player:next"); },
-    seek: function(offset) { ws.send("player:seek:"+parseInt(offset, 10)); },
-    volume: function(offset) { ws.send("player:volume:"+parseInt(offset, 10)); },
+    play: function() { ws.sendcmd('player','play'); },
+    pause: function() { ws.sendcmd('player','pause'); },
+    previous: function() { ws.sendcmd('player','previous'); },
+    next: function() { ws.sendcmd('player','next'); },
+    seek: function(offset) { ws.sendcmd('player','seek', parseInt(offset, 10)); },
+    volume: function(offset) { ws.sendcmd('player','volume', parseInt(offset, 10)); },
     parse: function(data) {
         console.debug("Got data from websocket: %o", data);
     }
