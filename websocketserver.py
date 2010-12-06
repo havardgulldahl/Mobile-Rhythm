@@ -14,6 +14,7 @@ import sys
 import re
 import logging
 import signal
+import urlparse
 #import asyncore
 
 class WebSocket(object):#asyncore.dispatcher_with_send):
@@ -59,8 +60,7 @@ class WebSocket(object):#asyncore.dispatcher_with_send):
             self.data = msgs.pop()
             for msg in msgs:
                 if msg[0] == '\x00':
-                    #self.onmessage(msg[1:]) 
-                    self.onmessage(msg) 
+                    self.onmessage(msg[1:]) 
         return True
                     
     def dohandshake(self, header, key=None): 
@@ -98,8 +98,9 @@ class WebSocket(object):#asyncore.dispatcher_with_send):
             handshake = WebSocket.handshake
         #logging.warning("loading template: %s (%s), %s (%s), %s (%s)", origin, type(origin), self.bindinfo[1],
         #type(self.bindinfo[1]), self.bindinfo[0], type(self.bindinfo[0]))
+        origin_host = urlparse.urlparse(origin).netloc.split(":")[0]
         handshake = handshake % {'origin': origin, 'port': self.bindinfo[1],
-                                    'bind': self.bindinfo[0] }
+                                    'bind': origin_host }
         logging.warning("Sending handshake %s" % handshake)   
         self.client.send(handshake)
         return True
@@ -115,30 +116,6 @@ class WebSocket(object):#asyncore.dispatcher_with_send):
         logging.warning("Sent message: %s" % data)
         self.client.send("\x00%s\xff" % data)
 
-class WebSocketServer(object):#asyncore.dispatcher):
-    def __init__(self, bind, port, cls=WebSocket, conn_cb=None):
-        #asyncore.dispatcher.__init__(self)
-        self.port = port
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        #asyncore.dispatcher.set_reuse_addr(self)
-        self.bind((bind, port))
-        self.socketbind = bind
-        self.cls = cls
-        self.connections = {}
-        self.connection_callback = conn_cb
-        self.listen(5)
-        logging.warning("Listening on %s" % self.port)
-        self.running = True
-
-    def handle_accept(self):
-        logging.warning("New client connection")
-        client, address = self.accept()
-        fileno = client.fileno()
-        self.connections[fileno] = self.cls(client)
-        self.connections[fileno].set_server(self)
-        if self.connection_callback is not None:
-            self.connection_callback(self.connections[fileno])
-
 def make_websocketserver(hostname, port):
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -147,10 +124,9 @@ def make_websocketserver(hostname, port):
     logging.warning("simple websockserver upat port %s:%s", hostname, port)
     return sock
 
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-    server = SetupWebSocket("192.168.0.20", 9004) 
+    server = SetupWebSocket("0.0.0.0", 9004) 
     def signal_handler(signal, frame):
         logging.info("Caught Ctrl+C, shutting down...")
         server.running = False

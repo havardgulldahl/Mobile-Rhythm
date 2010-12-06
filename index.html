@@ -30,6 +30,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 var ws;
 $(function() {
+    function sec2time(sec) {
+        var mins = Math.floor(sec / 60);
+        var secs = sec % 60;
+        return mins + ":" + secs;
+    }
 
 var port = window.location.port ? (parseInt(window.location.port, 10) + 1) : 9004;
 console.log("ws://"+window.location.hostname+":"+port+"/");
@@ -44,48 +49,90 @@ window.setInterval(function() {
 }, 1000);
 ws.onopen = function() {
     console.log("wsocket opened");
-      ws.send("Hello Mr. Server!");
+    player.get_status();
+    player.get_volume();
 };
 ws.onmessage = function (e) { player.parse(e.data); };
 ws.onclose = function() { console.warn("WebSocket closed"); };
 ws.onerror = function(e) { console.error("WebSocket error! %o", e); };
 ws.sendcmd = function(domain, cmd, args) { 
-    this.send(JSON.stringify({"domain":domain, "command": cmd, "args": args}));
+    if(args == undefined) args = [];
+    this.send(JSON.stringify({"domain":domain, "action": cmd, "args": args}));
 }
 
 var player = {
+    mute_state:false,
+    playing_state:false,
     play: function() { ws.sendcmd('player','play'); },
     pause: function() { ws.sendcmd('player','pause'); },
+    playpause: function() { ws.sendcmd('player','playpause'); },
     previous: function() { ws.sendcmd('player','previous'); },
     next: function() { ws.sendcmd('player','next'); },
     seek: function(offset) { ws.sendcmd('player','seek', parseInt(offset, 10)); },
-    volume: function(offset) { ws.sendcmd('player','volume', parseInt(offset, 10)); },
-    update_status: function(action, args) { 
-        console.debug("updating now playing: %o", args);
+    get_seek: function() { ws.sendcmd('player','get-seek'); },
+    update_seek: function(seek) { 
+        //seek is in seconds since start of song
+       $("#control-seek").val(seek); 
+       $("#control-position").text(sec2time(seek));
+
+    },
+    volume: function(offset) { ws.sendcmd('player','set-vol',
+    parseFloat(offset/100)); },
+    get_volume: function() { ws.sendcmd('player','get-vol'); },
+    update_volume: function(volume) { 
+        //volume is a float 0 < v < 1
+       $("#control-volume").val(parseInt(volume*100, 10)); 
+    },
+    get_mute: function() { ws.sendcmd('player','get-mute'); },
+    toggle_mute: function() { ws.sendcmd('player','set-mute',
+    !this.mute_state); },
+    set_mute: function(mute_state) { 
+        // state is bool
+        $("#control-mute")
+            .text((mute_state) ? "Unmute" : "Mute")
+            .data("icon", (mute_state) ? "delete" : "play");
+        this.mute_state = mute_state;
+    },
+    update_status: function(args) { 
         $("#now-playing em")
             .text("Now playing: " + args.artist + " - " + args.album + " - " + args.title)
-            .data(args.eid);
+            .data("eid", args.eid);
+        $("#control-length").text(sec2time(args.duration));
+        $("#control-seek").attr("max", args.duration);
+        player.get_seek();
     },
+    get_status: function() { ws.sendcmd('player','get-status'); },
     parse: function(data) {
         console.debug("Got data from websocket: %o", data);
         var msg = JSON.parse(data);
         switch(msg.domain) {
             case "player": 
-                player.update_status(msg.action, msg.args);
+                switch(msg.action) {
+                    case "playing":
+                    case "stopped":
+                    case "paused":
+                        player.update_status(msg.args);
+                        break;
+                    case "current_volume":
+                        player.update_volume(msg.args);
+                        break;
+                    case "seek":
+                        player.update_seek(msg.args);
+                        break;
+                }
                 break;
         }
     }
 };
 
-$("#control-playpause").toggle(function(playev) {
-    player.play();
-}, function(pauseev) {
-    player.pause();
+$("#control-playpause").click(function(playev) {
+    player.playpause();
 });
 $("#control-prev").click(function(ev) { player.previous(); });
 $("#control-next").click(function(ev) { player.next(); });
 $("#control-seek").change(function(ev) { player.seek(this.value); });
 $("#control-volume").change(function(ev) { player.volume(this.value); });
+$("#control-mute").click(function(ev) { player.toggle_mute(); });
 
 });
 
@@ -106,19 +153,22 @@ $("#control-volume").change(function(ev) { player.volume(this.value); });
                <div id="control-coverart">
                </div>
                <fieldset data-role="fieldcontain">
-                    <label id="control-position" for="control-seek">2:44/3:55</label>
+                    <label id="control-position" for="control-seek">2:44</label>/<span id="control-length">3:55</span>
                     <input type="range" id="control-seek" value="0" min="0" max="1000">
                </fieldset>
                <fieldset data-role="fieldcontain"> 
                     <div data-role="controlgroup" data-type="horizontal">
                         <a id="control-prev" data-role="button" data-icon="arrow-l" href="#">Previous</a>
-                        <a id="control-playpause" data-role="button" data-icon="delete" href="#">Stop</a>
+                        <a id="control-playpause" data-role="button"
+                        data-icon="delete" href="#">Pause</a>
                         <a id="control-next" data-role="button" data-icon="arrow-r" href="#">Next</a>
                     </div>
                </fieldset>
                <fieldset data-role="fieldcontain">
                     <label for="control-volume">Volume: </label>
                     <input type="range" id="control-volume" value="0" min="0" max="100">
+                    <a id="control-mute" data-role="button"
+                    data-icon="delete" href="#">Mute</a>
                </fieldset>
             </div>
             <div id="play-queue">

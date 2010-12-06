@@ -3,7 +3,7 @@
 #
 # Mobile Rhythm - web interface to Rhythmbox for mobile devices
 # Copyright (C) 2007 Michael Gratton.
-# Copyright (C) 2010 Håvard Gulldahl
+# Copyright (C) 2010 Håvard Gulldahl - websocket stuff
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -54,6 +54,11 @@ try:
 except:
     use_mdns = False
 
+SEARCH_MASK = ("Any", "Artist", "Title", "Album", "Genre")
+SEARCH_PROPS = ("Any", rhythmdb.PROP_ARTIST, rhythmdb.PROP_TITLE,
+                rhythmdb.PROP_ALBUM, rhythmdb.PROP_GENRE)
+SEARCH_PROPS_ANY = (rhythmdb.PROP_ARTIST, rhythmdb.PROP_TITLE,
+                    rhythmdb.PROP_ALBUM, rhythmdb.PROP_GENRE, rhythmdb.PROP_LOCATION)
 
 class MobileRhythmPlugin(rb.Plugin):
     entrygroup = None
@@ -134,43 +139,23 @@ class MobileRhythmPlugin(rb.Plugin):
             self.entrygroup = None
 
     def _playing_changed_cb(self, player, playing):
-        self._update_entry(player.get_playing_entry())
-
-    def _playing_entry_changed_cb(self, player, entry):
-        self._update_entry(entry)
-
-    def _extra_metadata_changed_cb(self, db, entry, field, metadata):
-        if entry == self.player.get_playing_entry():
-            self._update_entry(entry)
-
-    def _update_entry(self, entry):
         if not self.server:
             return
-        if entry:
-            artist   = self.db.entry_get(entry, rhythmdb.PROP_ARTIST)
-            album    = self.db.entry_get(entry, rhythmdb.PROP_ALBUM)
-            title    = self.db.entry_get(entry, rhythmdb.PROP_TITLE)
-            duration = self.db.entry_get(entry, rhythmdb.PROP_DURATION)
-            eid      = self.db.entry_get(entry, rhythmdb.PROP_ENTRY_ID)
-            stream = None
-            stream_title = \
-                self.db.entry_request_extra_metadata(entry,
-                                                     'rb:stream-song-title')
-            if stream_title:
-                stream = title
-                title = stream_title
-                if not artist:
-                    artist = self.db.\
-                        entry_request_extra_metadata(entry,
-                                                     'rb:stream-song-artist')
-                if not album:
-                    album = self.db.\
-                            entry_request_extra_metadata(entry,
-                                                         'rb:stream-song-album')
-            self.server.set_playing(artist, album, title, stream,duration,eid)
-            self.server._ws_update()
-        else:
-            self.server.set_playing(None, None, None, None,None,None)
+        self.server.signal_playing_changed(player, playing)
+        #self._update_entry(player.get_playing_entry())
+
+    def _playing_entry_changed_cb(self, player, entry):
+        if not self.server:
+            return
+        self.server.signal_entry_changed(player, entry)
+        #self._update_entry(entry)
+
+    def _extra_metadata_changed_cb(self, db, entry, field, metadata):
+        if not self.server:
+            return
+        self.server.signal_metadata_changed(entry)
+        #if entry == self.player.get_playing_entry():
+        #    self._update_entry(entry)
 
 class SimpleWebServer(BaseHTTPServer.BaseHTTPRequestHandler):
     server_version = "Mobile Rhythm Web Gui"
@@ -187,16 +172,11 @@ def make_webserver(hostname, port):
     return httpd
 
 class MobileRhythmServer(object):
+    _nowplaying = None
 
     def __init__(self, hostname, port, plugin):
         self.plugin = plugin
         self.running = True
-        self.artist = None
-        self.album = None
-        self.title = None
-        self.stream = None
-        self.duration = None
-        self.eid      = None
         self._watchlist = []
         self._wsbuffer = cStringIO.StringIO()
         self._httpd = make_webserver(hostname, port)
@@ -204,7 +184,7 @@ class MobileRhythmServer(object):
                                                     gobject.IO_IN,
                                                     self._idle_httpd_cb))
         if not hostname:
-            hostname = "localhost"
+            hostname = "0.0.0.0"
         self.websocket = make_websocketserver(hostname, port+1)
         self._watchlist.append(gobject.io_add_watch(self.websocket, gobject.IO_IN, self.websocklistener))
         self._websockets = {}
@@ -234,13 +214,47 @@ class MobileRhythmServer(object):
         self.running = False
         self.plugin = None
 
-    def set_playing(self, artist, album, title, stream,duration,eid):
-        self.artist = artist
-        self.album = album
-        self.title = title
-        self.stream = stream
-        self.duration = duration
-        self.eid = eid
+    def get_now_playing(self):
+        entry = self.plugin.player.get_playing_entry()
+        if not entry:
+            self._nowplaying = None
+            return None
+        else:
+            e = {"stream":None}
+            lookup = {"artist": rhythmdb.PROP_ARTIST,
+                      "album":rhythmdb.PROP_ALBUM,
+                      "title":rhythmdb.PROP_TITLE,
+                      "duration":rhythmdb.PROP_DURATION,
+                      "eid":rhythmdb.PROP_ENTRY_ID,
+                      "rating":rhythmdb.PROP_RATING
+            }
+            for z, i in lookup.items():
+                e[z] = self.plugin.db.entry_get(entry, i)
+            stream_title = \
+                self.plugin.db.entry_request_extra_metadata(entry,
+                                                     'rb:stream-song-title')
+            if stream_title:
+                e["stream"] = e["title"]
+                e["title"] = stream_title
+                if not e["artist"]:
+                    e["artist"] = self.plugin.db.\
+                        entry_request_extra_metadata(entry,
+                                                     'rb:stream-song-artist')
+                if not e["album"]:
+                    e["album"] = self.plugin.db.\
+                            entry_request_extra_metadata(entry,
+                                                         'rb:stream-song-album')
+            self._nowplaying = e
+            return e
+
+    def signal_playing_changed(self, player, playing):
+        self._ws_update()
+
+    def signal_entry_changed(self, player, entry):
+        self._ws_update()
+
+    def signal_metadata_changed(self, entry):
+        self._ws_update()
 
     def _send(self, data, receiver=None):
         d = json.dumps(data)
@@ -269,14 +283,15 @@ class MobileRhythmServer(object):
 
     def _ws_update(self):
         logging.warning("sending update")
-        self._send({"domain":"player",
-                    "action":"playing",
-                    "args": { "artist": self.artist,
-                                "album": self.album,
-                                "title": self.title,
-                                "stream": self.stream,
-                                "duration": self.duration,
-                                "eid": self.eid}})
+        args = self.get_now_playing()
+        if args is not None:
+            action = "playing"
+            #args["playingtime"] = self.plugin.player.get_playing_time()
+        else:
+            action = "stopped"
+        self._send({"domain": "player",
+                    "action": action,
+                    "args": args})
 
     def _open(self, filename):
         filename = os.path.join(os.path.dirname(__file__), filename)
@@ -289,46 +304,168 @@ class MobileRhythmServer(object):
         return True
 
     def _wsmessage(self, data):
-        logging.warning("Got data: %s" % data)
+        logging.warning("Got data: %s" , repr(data))
         try:
             message = json.loads(data)
         except Exception, (e):
             logging.exception(e)
             return False
-        if message.action == 'play':		
+        #available methods
+        # 
+# 'add_play_order',
+# 'chain',
+# 'connect',
+# 'connect_after',
+# 'connect_object',
+# 'connect_object_after',
+# 'construct_child',
+# 'disconnect',
+# 'disconnect_by_func',
+# 'do_add_child',
+# 'do_construct_child',
+# 'do_get_internal_child',
+# 'do_next',
+# 'do_parser_finished',
+# 'do_previous',
+# 'do_set_name',
+# 'emit',
+# 'emit_stop_by_name',
+# 'freeze_notify',
+# 'get_active_source',
+# 'get_data',
+# 'get_internal_child',
+# 'get_mute',
+# 'get_name',
+# 'get_orientation',
+# 'get_playback_state',
+# 'get_playing',
+# 'get_playing_entry',
+# 'get_playing_path',
+# 'get_playing_song_duration',
+# 'get_playing_source',
+# 'get_playing_time',
+# 'get_playing_time_string',
+# 'get_properties',
+# 'get_property',
+# 'get_volume',
+# 'handler_block',
+# 'handler_block_by_func',
+# 'handler_disconnect',
+# 'handler_is_connected',
+# 'handler_unblock',
+# 'handler_unblock_by_func',
+# 'jump_to_current',
+# 'notify',
+# 'parser_finished',
+# 'pause',
+# 'play',
+# 'play_entry',
+# 'playpause',
+# 'props',
+# 'ref_accessible',
+# 'remove_play_order',
+# 'seek',
+# 'set_data',
+# 'set_mute',
+# 'set_name',
+# 'set_orientation',
+# 'set_playback_state',
+# 'set_playing_source',
+# 'set_playing_time',
+# 'set_properties',
+# 'set_property',
+# 'set_selected_source',
+# 'set_volume',
+# 'set_volume_relative',
+# 'stop',
+# 'stop_emission',
+# 'thaw_notify',
+# 'toggle_mute',
+# 'weak_ref']
+   #def ctrl_rate(self, rating):
+        
+        #if self.__item_entry is not None:
+            #db = self.__shell.props.db
+            #try:
+                #db.set(self.__item_entry, rhythmdb.PROP_RATING, rating)
+            #except gobject.GError, e:
+                #log.debug("rating failed: %s" % str(e))
+    #
+    #def ctrl_toggle_playing(self):
+        #
+        #sp = self.__shell.get_player()
+        #
+        #try:
+            #sp.playpause()
+        #except gobject.GError, e:
+            #log.debug("toggle play pause failed: %s" % str(e))
+                #
+    #def ctrl_toggle_repeat(self):
+        #
+        #sp = self.__shell.get_player()
+        #
+        #now = sp.props.play_order
+        #
+        #next = PLAYERORDER_TOGGLE_MAP_REPEAT.get(now, now)
+            #
+        #self.__gconf.set_string("/apps/rhythmbox/state/play_order", next)
+    #
+        ## update state within a short time (don't wait for scheduled poll)
+        #gobject.idle_add(self.poll)
+        #
+    #def ctrl_toggle_shuffle(self):
+        
+        #sp = self.__shell.get_player()
+        
+        #now = sp.props.play_order
+        ##
+        #next = PLAYERORDER_TOGGLE_MAP_SHUFFLE.get(now, now)
+        #
+        #self.__gconf.set_string("/apps/rhythmbox/state/play_order", next)
+        if message["action"] == 'play':		
+            player = self.plugin.player
             if not player.get_playing():
                 if not player.get_playing_source():
-                    return self._play_entry(args)
+                    return self._play_entry(message["args"])
                 else:
-                    return self._play(args)
+                    return self._play()
             else:
-                return self._pause(args)
-        elif message.action == 'pause':
-            player.pause()
-        elif message.action == 'play-entry':
-            return self._play_entry(args)
-        elif message.action == 'next':
-            player.do_next()
-        elif message.action == 'prev':
-            player.do_previous()
-        elif message.action == 'stop':
-            player.stop()
-        elif message.action == 'set-vol':
-            return self._setvolume(args)
-        elif message.action == 'get-vol':
-            return self._getvolume(args)
-        elif message.action == 'vol-up':
-            player.set_volume(player.get_volume() + 0.1)
-        elif message.action == 'vol-down':
-            player.set_volume(player.get_volume() - 0.1)
-        elif message.action == 'get-playlist':
-            return self._make_playlist()
-        elif message.action == 'get-playing':
-            return self._getplaying()
-        elif message.action == 'set-play-time':
-            return self._setplaypos(args)
+                return self._pause()
+        elif message["action"] == 'playpause':
+            self.plugin.player.playpause()
+        elif message["action"] == 'pause':
+            self.plugin.player.pause()
+        elif message["action"] == 'play-entry':
+            return self._play_entry(message["args"])
+        elif message["action"] == 'get-state':
+            return self._getstate()
+        elif message["action"] == 'next':
+            self.plugin.player.do_next()
+        elif message["action"] == 'previous':
+            self.plugin.player.do_previous()
+        elif message["action"] == 'stop':
+            self.plugin.player.stop()
+        elif message["action"] == 'mute':
+            self.plugin.player.set_mute()
+        elif message["action"] == 'set-vol':
+            return self._setvolume(message["args"])
+        elif message["action"] == 'get-vol':
+            return self._getvolume()
+        elif message["action"] == 'vol-up':
+            self.plugin.player.set_volume(player.get_volume() + 0.1)
+        elif message["action"] == 'vol-down':
+            self.plugin.player.set_volume(player.get_volume() - 0.1)
+        elif message["action"] == 'get-playlist':
+            return self._make_playlist(message["args"])
+        elif message["action"] == 'get-playingtime':
+            return self._getplayingtime()
+        elif message["action"] == 'set-playingtime':
+            return self._setplayingtime(message["args"])
+        else:
+            logging.warning("Uknown action: %s", message["action"])
 
-    def _make_playlist(self):
+    def _make_playlist(self, query):
+        logging.warning("make playlist:%s", query)
         db = self.plugin.db
         #artist = '2pac'
         #qresult = (rhythmdb.QUERY_PROP_EQUALS, rhythmdb.PROP_ARTIST_FOLDED,artist.encode('utf-8'))
@@ -350,6 +487,7 @@ class MobileRhythmServer(object):
                     "artist":db.entry_get(entry, rhythmdb.PROP_ARTIST),
                     "album":db.entry_get(entry, rhythmdb.PROP_ALBUM),
                     "duration":db.entry_get(entry, rhythmdb.PROP_DURATION),
+                    "rating":db.entry_get(entry, rhythmdb.PROP_RATING),
                     "genre":db.entry_get(entry, rhythmdb.PROP_GENRE),
             }
             playlist.append(item)
@@ -371,9 +509,23 @@ class MobileRhythmServer(object):
         player.set_volume(float(value))
         return self._getvolume()
 
+    def _getstate(self):
+        player = self.plugin.player
+        self._send({"domain":"player", 
+                    "action": "state", 
+                    "args": { "volume": player.get_volume(),
+                              "playing_state": player.get_playing_state(),
+                              "mute_state": player.get_mute(),
+                              #"playingtime": player.get_playing_time(),
+                              "eid": self.eid }}) # TODO: get eid from player. objecT
+
     def _getvolume(self):
         player = self.plugin.player
         self._send({"domain":"player", "action": "current_vol", "args":player.get_volume()})
+
+    def _mute(self):
+        player = self.plugin.player
+        self._send({"domain":"player", "action": "mute", "args":player.get_mute()})
 
     def _pause(self):
         player = self.plugin.player
@@ -383,7 +535,6 @@ class MobileRhythmServer(object):
     def _play(self):
         player = self.plugin.player
         player.play()
-        self._getplaying()
 
     def _play_entry(self, args):
         player = self.plugin.player
@@ -393,28 +544,28 @@ class MobileRhythmServer(object):
         sys.stdout.write('location value received : %s' %params['location'][0])
         sys.stdout.write('entry title: %s' % db.entry_get(pentry, rhythmdb.PROP_ARTIST))
         player.play_entry(pentry)
-        self._getplaying()
 
-    def _setplaypos(self, position):
+    def _setplayingtime(self, position):
         player = self.plugin.player
         player.set_playing_time(int(position))
-        return self._getplaypos()
+        return self._getplayingtime()
 
-    def _getplaypos(self):
+    def _getplayingtime(self):
         player = self.plugin.player
-        #self._send({"domain":"player", "action":"playtime", "args":player.get_playing_time()})
-        self._send({"domain":"player", "action":"playpos", "args":player.get_playing_time()})
+        self._send({"domain":"player", "action":"playingtime", "args":player.get_playing_time()})
 
     def _getplaying(self):
         player = self.plugin.player
-        playing = None
+        args = {}
+        action = "stopped"
         if self.stream or self.title:
-            playing = {}
-            for z in ("eid", "title", "artist", "album", "duration"):
-                playing[z] = getattr(self, z)
+            action = "playing"
+            for z in ("rating", "eid", "title", "artist", "album", "duration"):
+                args[z] = getattr(self, z)
             if self.stream:
-                playing["stream"] = self.stream
-        self._send({"domain":"player", "action": "playing", "args":playing})
+                args["stream"] = self.stream
+            #args["playingtime"] = self.plugin.player.get_playing_time()
+        self._send({"domain":"player", "action":action, "args":args})
 
     def _handle_stock(self, environ, response):
         path = environ['PATH_INFO']
