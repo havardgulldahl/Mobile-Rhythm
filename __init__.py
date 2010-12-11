@@ -27,6 +27,7 @@ import os
 import sys
 import time
 import json
+import hashlib
 import asyncore
 import logging
 
@@ -74,6 +75,8 @@ class MobileRhythmPlugin(rb.Plugin):
         self.shell_cb_ids = (
             self.player.connect ('playing-song-changed',
                                  self._playing_entry_changed_cb),
+            self.player.connect ('playing-source-changed',
+                                 self._source_changed_cb),
             self.player.connect ('playing-changed',
                                  self._playing_changed_cb)
             )
@@ -144,6 +147,12 @@ class MobileRhythmPlugin(rb.Plugin):
         self.server.signal_playing_changed(player, playing)
         #self._update_entry(player.get_playing_entry())
 
+    def _source_changed_cb(self, player, new_source):
+        if not self.server:
+            return
+        logging.warning("source changed: %s", new_source)
+        self.server.signal_source_changed(player, new_source)
+
     def _playing_entry_changed_cb(self, player, entry):
         if not self.server:
             return
@@ -188,6 +197,7 @@ class MobileRhythmServer(object):
         self.websocket = make_websocketserver(hostname, port+1)
         self._watchlist.append(gobject.io_add_watch(self.websocket, gobject.IO_IN, self.websocklistener))
         self._websockets = {}
+        self._playlists = {}
 
     def websocklistener(self, sock, *args):
         '''Asynchronous connection listener. Starts a handler for each connection.'''
@@ -248,7 +258,7 @@ class MobileRhythmServer(object):
             return e
 
     def signal_playing_changed(self, player, playing):
-        self._ws_update()
+        self._ws_update(playing=playing)
 
     def signal_entry_changed(self, player, entry):
         self._ws_update()
@@ -256,11 +266,17 @@ class MobileRhythmServer(object):
     def signal_metadata_changed(self, entry):
         self._ws_update()
 
+    def signal_source_changed(self, player, new_source):
+        pass
+
     def _send(self, data, receiver=None):
         d = json.dumps(data)
         if receiver is None: # send to all
             for z in self._websockets.values():
-                z.send(d)
+                try:
+                    z.send(d)
+                except socket.error, e:
+                    logging.warning("socket %s won't take our data", z)
         else:
             self._websockets[receiver].send(d)
         #self._wsbuffer.write(json.dumps(data))
@@ -281,14 +297,15 @@ class MobileRhythmServer(object):
         logging.warning("WebSocket Exception: %s %s", errtype, value)
         logging.exception(traceback)
 
-    def _ws_update(self):
-        logging.warning("sending update")
+    def _ws_update(self, playing=None):
+        logging.warning("sending update, playing=%s", playing)
+        action = playing and "playing" or "paused"
         args = self.get_now_playing()
         if args is not None:
-            action = "playing"
+            if action is None: action = "playing"
             #args["playingtime"] = self.plugin.player.get_playing_time()
         else:
-            action = "stopped"
+            if action is None: action = "stopped"
         self._send({"domain": "player",
                     "action": action,
                     "args": args})
@@ -437,16 +454,20 @@ class MobileRhythmServer(object):
             self.plugin.player.pause()
         elif message["action"] == 'play-entry':
             return self._play_entry(message["args"])
-        elif message["action"] == 'get-state':
-            return self._getstate()
         elif message["action"] == 'next':
             self.plugin.player.do_next()
         elif message["action"] == 'previous':
             self.plugin.player.do_previous()
         elif message["action"] == 'stop':
             self.plugin.player.stop()
-        elif message["action"] == 'mute':
-            self.plugin.player.set_mute()
+        elif message["action"] == 'get-state':
+            return self._getstate()
+        elif message["action"] == 'get-nowplaying':
+            return self._getnowplaying()
+        elif message["action"] == 'set-mute':
+            return self._setmute(message["args"])
+        elif message["action"] == 'get-mute':
+            return self._getmute()
         elif message["action"] == 'set-vol':
             return self._setvolume(message["args"])
         elif message["action"] == 'get-vol':
@@ -455,45 +476,55 @@ class MobileRhythmServer(object):
             self.plugin.player.set_volume(player.get_volume() + 0.1)
         elif message["action"] == 'vol-down':
             self.plugin.player.set_volume(player.get_volume() - 0.1)
-        elif message["action"] == 'get-playlist':
-            return self._make_playlist(message["args"])
+        elif message["action"] == 'search-library':
+            return self._search_library(**message["args"])
         elif message["action"] == 'get-playingtime':
             return self._getplayingtime()
         elif message["action"] == 'set-playingtime':
             return self._setplayingtime(message["args"])
+        elif message["action"] == 'get-queue':
+            return self._get_next_entries()
+        elif message["action"] == 'get-playlists':
+            return self._get_playlists()
+        elif message["action"] == 'set-playlist':
+            return self._set_playlist(message["args"])
         else:
             logging.warning("Uknown action: %s", message["action"])
 
-    def _make_playlist(self, query):
-        logging.warning("make playlist:%s", query)
+    def _search_library(self, proptype, query=None,  offset=0, limit=None, fuzzy=True):
+        logging.warning("query_library:%s %s %s %s", proptype, query, offset, limit)
         db = self.plugin.db
         #artist = '2pac'
         #qresult = (rhythmdb.QUERY_PROP_EQUALS, rhythmdb.PROP_ARTIST_FOLDED,artist.encode('utf-8'))
 
-        libquery = (rhythmdb.QUERY_PROP_EQUALS, rhythmdb.PROP_TYPE,db.entry_type_get_by_name('song'))
+        qp = fuzzy and rhythmdb.QUERY_PROP_LIKE or rhythmdb.QUERY_PROP_EQUALS
+
+        if proptype == "album":
+            libquery = (qp, rhythmdb.PROP_ALBUM, query and query.encode('utf-8') or "unknown")
+        elif proptype == "artist":
+            libquery = (qp, rhythmdb.PROP_ARTIST_FOLDED, query and query.encode('utf-8') or "unknown")
+        elif proptype == "song":
+            libquery = (qp, rhythmdb.PROP_TITLE_FOLDED, query and query.encode('utf-8') or "unknown")
+        elif proptype == "test":
+            libquery = (rhythmdb.QUERY_PROP_EQUALS, rhythmdb.PROP_ARTIST, db.entry_type_get_by_name("song"))
+        else:
+            logging.error("Unknown proptype: %s", proptype)
+            return
 
         playlist_rows = self._player_search(libquery)
         if playlist_rows.get_size() == 0:
-            return self._send({"domain":"playlist",
-                                "action" "playlist"
-                                "args" :[]})
+            return self._send({"domain":"library",
+                                "action": proptype,
+                                "args" :{"query":query, "offset":offset, "limit":limit, "result":[]}})
         playlist = []
         for row in playlist_rows:
             entry = row[0]
-            item = {"track_number":db.entry_get(entry, rhythmdb.PROP_TRACK_NUMBER),
-                    "title":db.entry_get(entry, rhythmdb.PROP_TITLE),
-                    "eid":db.entry_get(entry, rhythmdb.PROP_ENTRY_ID),
-                    "title":db.entry_get(entry, rhythmdb.PROP_TITLE),
-                    "artist":db.entry_get(entry, rhythmdb.PROP_ARTIST),
-                    "album":db.entry_get(entry, rhythmdb.PROP_ALBUM),
-                    "duration":db.entry_get(entry, rhythmdb.PROP_DURATION),
-                    "rating":db.entry_get(entry, rhythmdb.PROP_RATING),
-                    "genre":db.entry_get(entry, rhythmdb.PROP_GENRE),
-            }
+            item = self.get_simple_object_from_entry(entry)
             playlist.append(item)
-        self._send({"domain":"playlist",
-                    "action" "playlist"
-                    "args" :playlist})
+        self._send({"domain":"library",
+                    "action":proptype,
+                    "args" :{"query":query, "offset":offset, "limit":limit, "result":playlist}})
+                    
 
     def _player_search(self, search):
         #"""perform a player search"""
@@ -504,28 +535,130 @@ class MobileRhythmServer(object):
         db.do_full_query_parsed(query_model, query)
         return query_model;
 
+    def _get_simple_object_from_entry(self, entry):
+        db = self.plugin.db
+        item = {"track_number":db.entry_get(entry, rhythmdb.PROP_TRACK_NUMBER),
+                "title":db.entry_get(entry, rhythmdb.PROP_TITLE),
+                "eid":db.entry_get(entry, rhythmdb.PROP_ENTRY_ID),
+                "title":db.entry_get(entry, rhythmdb.PROP_TITLE),
+                "artist":db.entry_get(entry, rhythmdb.PROP_ARTIST),
+                "album":db.entry_get(entry, rhythmdb.PROP_ALBUM),
+                "duration":db.entry_get(entry, rhythmdb.PROP_DURATION),
+                "rating":db.entry_get(entry, rhythmdb.PROP_RATING),
+                "genre":db.entry_get(entry, rhythmdb.PROP_GENRE),
+        }
+        return item
+
+    def _get_next_entries(self, entry=None, cnt=5):
+        """Gets the next entries to be played from both active source and queue
+        
+        Uses each source's query-model.
+        entry = entry to start from (as a kind of offset)
+        cnt = number of entries to return
+        """
+
+        player = self.plugin.player
+        if entry is None:
+            try:
+                entry = player.get_playing_entry()
+            except:
+                pass
+        if not entry:
+            self._send({"domain":"player", "action":"playqueue", "args":[]})
+            return
+
+        entries = [entry]
+        
+        queue = player.get_property("queue-source")
+        if queue:
+            querymodel = queue.get_property("query-model")
+            l = querymodel.get_next_from_entry(entry)
+            while l and len(entries) <= cnt:
+                entries.append(l)
+                l = querymodel.get_next_from_entry(l)
+        source = player.get_property("source")
+        if source:
+            querymodel = source.get_property("query-model")
+            l = querymodel.get_next_from_entry(entry)
+            while l and len(entries) <= cnt:
+                entries.append(l)
+                l = querymodel.get_next_from_entry(l)
+
+        #return entries
+        simple_entries = [self._get_simple_object_from_entry(e) for e in entries]
+        self._send({"domain":"player", "action":"playqueue", "args":simple_entries})
+
+    def _get_playlists(self):
+        player = self.plugin.player
+        playlists = []
+        playlist_model_entries = [x for x in 
+            list(self.plugin.shell.props.sourcelist.props.model)
+            if list(x)[2] == "Playlists"]
+        if playlist_model_entries:
+            playlist_iter = playlist_model_entries[0].iterchildren()
+            i = 0
+            for playlist_item in playlist_iter:
+                logging.warning("got playlist iten: %s", playlist_item[1])
+                plid = hashlib.md5(playlist_item[2]).hexdigest()
+                playlists.append({"name":playlist_item[2], "plid":plid})
+                #print "Playlist image: %s, name: %s, source: %s" % (playlist_item[1], playlist_item[2],
+                #playlist_item[3])
+                self._playlists[plid] = playlist_item[3]
+                i += 1
+        self._send({"domain":"playlist", "action":"get", "args":playlists})
+
+    def _set_playlist(self, plid):
+        player = self.plugin.player
+        shell = self.plugin.shell
+        player.stop()
+        shell.props.sourcelist.select(self._playlists.get(plid, None))
+        logging.warning("chose new source/playlist : %s", plid)
+# start playing from the beginning
+        player.play()
+# or, if you've got a specific RhythmDBEntry that you want to play
+        #player.play_entry(entry)
+
+    def _getvolume(self):
+        player = self.plugin.player
+        self._send({"domain":"player", "action": "current_volume", "args":player.get_volume()})
+
     def _setvolume(self, value):
         player = self.plugin.player
         player.set_volume(float(value))
         return self._getvolume()
 
+    def _getmute(self):
+        self._send({"domain":"player",
+                    "action":"mute_state",
+                    "args" : self.plugin.player.get_mute()})
+
+    def _setmute(self, state):
+        self.plugin.player.set_mute(state)
+        self._getmute()
+
     def _getstate(self):
         player = self.plugin.player
+        eid = self._nowplaying and self._nowplaying["eid"] or None
+        playing = player.get_playing()
+        try:
+            playingtime = player.get_playing_time()
+        except:
+            playingtime = None
+
+        if playing: pstate = "playing"
+        elif playingtime is None: pstate = "stopped"
+        else: pstate = "paused"
+
         self._send({"domain":"player", 
                     "action": "state", 
                     "args": { "volume": player.get_volume(),
-                              "playing_state": player.get_playing_state(),
+                              "playing_state": pstate,
                               "mute_state": player.get_mute(),
-                              #"playingtime": player.get_playing_time(),
-                              "eid": self.eid }}) # TODO: get eid from player. objecT
+                              "playingtime": playingtime,
+                              "eid": eid }}) # TODO: get eid from player. objecT
 
-    def _getvolume(self):
-        player = self.plugin.player
-        self._send({"domain":"player", "action": "current_vol", "args":player.get_volume()})
-
-    def _mute(self):
-        player = self.plugin.player
-        self._send({"domain":"player", "action": "mute", "args":player.get_mute()})
+    def _getnowplaying(self):
+        self._send({"domain":"player", "action": "nowplaying", "args":self._nowplaying})
 
     def _pause(self):
         player = self.plugin.player
@@ -552,20 +685,27 @@ class MobileRhythmServer(object):
 
     def _getplayingtime(self):
         player = self.plugin.player
-        self._send({"domain":"player", "action":"playingtime", "args":player.get_playing_time()})
+        try:
+            self._send({"domain":"player", "action":"playingtime", "args":player.get_playing_time()})
+        except Exception, e:
+            logging.error("Could not get playing time")
+            logging.exception(e)
 
-    def _getplaying(self):
-        player = self.plugin.player
-        args = {}
-        action = "stopped"
-        if self.stream or self.title:
-            action = "playing"
-            for z in ("rating", "eid", "title", "artist", "album", "duration"):
-                args[z] = getattr(self, z)
-            if self.stream:
-                args["stream"] = self.stream
-            #args["playingtime"] = self.plugin.player.get_playing_time()
-        self._send({"domain":"player", "action":action, "args":args})
+    def _get_cover_art(self, entry=None):
+        if entry is None:
+            try:
+                entry = self.plugin.player.get_playing_entry()
+            except:
+                pass
+        if entry:
+            db = self.plugin.db
+            cover_art = db.entry_request_extra_metadata(entry, "rb:coverArt")
+            logging.warning("Got cover art: %s", cover_art)
+            self._send({"domain":"metadata", 
+                        "action":"coverart", 
+                        "args":{"eid":db.entry_get(entry, rhythmdb.PROP_ENTRY_ID),
+                                "art":cover_art}})
+                                               
 
     def _handle_stock(self, environ, response):
         path = environ['PATH_INFO']

@@ -36,6 +36,18 @@ $(function() {
         return mins + ":" + secs;
     }
 
+    function update_icon(obj, icon_class) {
+        var o = $(obj + " span.ui-icon");
+        o.removeClass(function(i, className) {
+            var r = [];
+            $.each(className.split(" "), function(i, val) {
+                if(val.substring(0, 8) == "ui-icon-")
+                    r.push(val);
+            });
+            return r.join(" ");
+        }).addClass("ui-icon-" + icon_class);
+    }
+
 var port = window.location.port ? (parseInt(window.location.port, 10) + 1) : 9004;
 console.log("ws://"+window.location.hostname+":"+port+"/");
 ws = new WebSocket("ws://"+window.location.hostname+":"+port+"/");
@@ -49,8 +61,8 @@ window.setInterval(function() {
 }, 1000);
 ws.onopen = function() {
     console.log("wsocket opened");
-    player.get_status();
-    player.get_volume();
+    player.get_state();
+    playlist.get();
 };
 ws.onmessage = function (e) { player.parse(e.data); };
 ws.onclose = function() { console.warn("WebSocket closed"); };
@@ -60,64 +72,184 @@ ws.sendcmd = function(domain, cmd, args) {
     this.send(JSON.stringify({"domain":domain, "action": cmd, "args": args}));
 }
 
+var playlist = {
+    get : function() { ws.sendcmd("playlist", "get-playlists"); },
+    set : function(plid) { ws.sendcmd("playlist", "set-playlist", plid); },
+    update : function(playlists) {
+        $.each(playlists, function(i, item) {
+            $("<li><a href='#'/></li>")
+                .appendTo("#playlist-browser")
+                .find("a")
+                .data("plid", item.plid)
+                //.bind("tap", function(ev) { 
+                .click(function(ev) { 
+                    console.debug("setting new playlist from tap: %o", this);
+                    return playlist.set($(this).data("plid"));
+                })
+                .text(item.name);
+        });
+        $("#playlist-browser").listview('refresh');
+    }
+};
+
 var player = {
     mute_state:false,
     playing_state:false,
+    current_entry_id:false,
+    current_volume:false,
+    current_seek:false,
+    play_clock:null,
+    volume_clock:null,
+    seek_clock:null,
     play: function() { ws.sendcmd('player','play'); },
     pause: function() { ws.sendcmd('player','pause'); },
     playpause: function() { ws.sendcmd('player','playpause'); },
     previous: function() { ws.sendcmd('player','previous'); },
     next: function() { ws.sendcmd('player','next'); },
-    seek: function(offset) { ws.sendcmd('player','seek', parseInt(offset, 10)); },
-    get_seek: function() { ws.sendcmd('player','get-seek'); },
-    update_seek: function(seek) { 
-        //seek is in seconds since start of song
-       $("#control-seek").val(seek); 
-       $("#control-position").text(sec2time(seek));
-
+    playingtime: function(offset) { 
+        if(offset != this.current_seek) {
+            if(this.seek_clock) window.clearTimeout(this.seek_clock);
+            this.seek_clock = window.setTimeout(function() { 
+                ws.sendcmd('player','set-playingtime', parseInt(offset, 10)); 
+            }, 500);
+        }
     },
-    volume: function(offset) { ws.sendcmd('player','set-vol',
-    parseFloat(offset/100)); },
+    get_playingtime: function() { ws.sendcmd('player','get-playingtime'); },
+    update_playingtime: function(seek) { 
+        //seek is in seconds since start of song
+        this.current_seek = seek;
+        $("#control-seek").val(seek).trigger("keyup"); 
+        $("#control-position").text(sec2time(seek));
+    },
+    volume: function(offset) { 
+        if(offset != this.current_volume) {
+            if(this.volume_clock) window.clearTimeout(this.volume_clock);
+            this.volume_clock = window.setTimeout(function() { 
+                ws.sendcmd('player','set-vol', parseFloat(offset/100)); 
+            }, 500);
+        }
+    },
     get_volume: function() { ws.sendcmd('player','get-vol'); },
     update_volume: function(volume) { 
         //volume is a float 0 < v < 1
-       $("#control-volume").val(parseInt(volume*100, 10)); 
+        this.current_volume = parseInt(volume*100, 10);
+        $("#control-volume").val(parseInt(volume*100, 10)).trigger('keyup'); 
     },
     get_mute: function() { ws.sendcmd('player','get-mute'); },
     toggle_mute: function() { ws.sendcmd('player','set-mute',
     !this.mute_state); },
-    set_mute: function(mute_state) { 
+    update_mute: function(mute_state) { 
         // state is bool
-        $("#control-mute")
-            .text((mute_state) ? "Unmute" : "Mute")
-            .data("icon", (mute_state) ? "delete" : "play");
+        console.debug("updateing mute state; %o", mute_state);
+        $("#control-mute span.ui-btn-text").text((mute_state) ? "Unmute" : "Mute");
+        update_icon("#control-mute", (mute_state) ? "forward" : "back"); 
         this.mute_state = mute_state;
     },
-    update_status: function(args) { 
+    update_playing: function(args) { 
         $("#now-playing em")
             .text("Now playing: " + args.artist + " - " + args.album + " - " + args.title)
             .data("eid", args.eid);
         $("#control-length").text(sec2time(args.duration));
-        $("#control-seek").attr("max", args.duration);
-        player.get_seek();
+        //$("#control-seek").attr("max", args.duration);
+        $("#control-playpause span.ui-btn-text").text("Pause");
+        update_icon("#control-playpause", "minus");
+        //player.get_playingtime();
+        player.get_playqueue();
     },
-    get_status: function() { ws.sendcmd('player','get-status'); },
+    update_paused: function(args) { 
+        var s = "Paused";
+        try {
+            s += ": " + args.artist + " - " + args.album + " - " + args.title;
+            $("#control-length").text(sec2time(args.duration));
+            $("#control-seek").attr("max", args.duration);
+        } catch(e) {
+            $("#control-length").text("0:00");
+            //$("#control-seek").attr("max", 100);
+        }
+        $("#now-playing em")
+            .text(s);
+        $("#control-playpause span.ui-btn-text").text("Play");
+        update_icon("#control-playpause", "plus");
+        //player.get_playingtime();
+        player.get_playqueue();
+    },
+    update_stopped: function(args) {
+        $("#now-playing em")
+            .data("eid", "")
+            .text("Stopped");
+        $("#control-length").text("0:00");
+        //$("#control-seek").attr("max", 100);
+        $("#control-playpause span.ui-btn-text").text("Play");
+        update_icon("#control-playpause", "plus");
+        player.clear_playqueue();
+    },
+    get_nowplaying: function() { ws.sendcmd('player','get-nowplaying'); },
+    get_state: function() { ws.sendcmd('player','get-state'); },
+    update_state: function(state) {
+        this.update_volume(state.volume);
+        this.update_mute(state.mute);
+        //this.update_playingtime(state.playingtime);
+        if(this.playing_state != state.playing_state ||
+           this.current_entry_id != state.eid) {
+            this.current_entry_id = state.eid;
+            player.get_nowplaying(); 
+        }
+    },
+    get_playqueue: function() { ws.sendcmd('player','get-queue'); },
+    clear_playqueue: function() { $("#play-queue ol").empty(); },
+    set_playqueue: function(q) {
+        this.clear_playqueue();
+        $.each(q, function(i, item) {
+            $("<li><a href='#'></a></li>")
+                .appendTo("#play-queue ol")
+                .find("a")
+                .data("entry", item)
+                .text(item.artist + "/" + item.title + " (" + item.album + ")");
+
+        });
+        $("#play-queue ol").listview("refresh");
+
+    },
     parse: function(data) {
         console.debug("Got data from websocket: %o", data);
         var msg = JSON.parse(data);
         switch(msg.domain) {
+            case "playlist":
+                switch(msg.action) {
+                    case "get":
+                        playlist.update(msg.args);
+                        break;
+                    case "set":
+                        player.update_playlist(msg.args);
+                        break;
+                }
+                break;
             case "player": 
                 switch(msg.action) {
                     case "playing":
-                    case "stopped":
+                    case "nowplaying":
+                        player.update_playing(msg.args);
+                        break;
                     case "paused":
-                        player.update_status(msg.args);
+                        player.update_paused(msg.args);
+                        break;
+                    case "stopped":
+                        player.update_stopped(msg.args);
                         break;
                     case "current_volume":
                         player.update_volume(msg.args);
                         break;
-                    case "seek":
-                        player.update_seek(msg.args);
+                    case "playingtime":
+                        //player.update_playingtime(msg.args);
+                        break;
+                    case "state":
+                        player.update_state(msg.args);
+                        break;
+                    case "playqueue":
+                        player.set_playqueue(msg.args);
+                        break;
+                    default:
+                        console.debug("unknown action: %s", msg.action);
                         break;
                 }
                 break;
@@ -130,8 +262,8 @@ $("#control-playpause").click(function(playev) {
 });
 $("#control-prev").click(function(ev) { player.previous(); });
 $("#control-next").click(function(ev) { player.next(); });
-$("#control-seek").change(function(ev) { player.seek(this.value); });
-$("#control-volume").change(function(ev) { player.volume(this.value); });
+//$("#control-seek").hide().change(function(ev) { player.playingtime(this.value); });
+$("#control-volume").hide().change(function(ev) { player.volume(this.value); });
 $("#control-mute").click(function(ev) { player.toggle_mute(); });
 
 });
@@ -152,26 +284,28 @@ $("#control-mute").click(function(ev) { player.toggle_mute(); });
                <em>Now playing: stopped</em>
                <div id="control-coverart">
                </div>
+               <!--
                <fieldset data-role="fieldcontain">
                     <label id="control-position" for="control-seek">2:44</label>/<span id="control-length">3:55</span>
                     <input type="range" id="control-seek" value="0" min="0" max="1000">
                </fieldset>
+               -->
                <fieldset data-role="fieldcontain"> 
                     <div data-role="controlgroup" data-type="horizontal">
                         <a id="control-prev" data-role="button" data-icon="arrow-l" href="#">Previous</a>
                         <a id="control-playpause" data-role="button"
-                        data-icon="delete" href="#">Pause</a>
+                        data-icon="minus" href="#">Pause</a>
                         <a id="control-next" data-role="button" data-icon="arrow-r" href="#">Next</a>
                     </div>
                </fieldset>
                <fieldset data-role="fieldcontain">
                     <label for="control-volume">Volume: </label>
                     <input type="range" id="control-volume" value="0" min="0" max="100">
-                    <a id="control-mute" data-role="button"
-                    data-icon="delete" href="#">Mute</a>
+                    <a id="control-mute" data-role="button" data-icon="delete" data-inline="true" href="#">Mute</a>
                </fieldset>
             </div>
             <div id="play-queue">
+                <h4>Upcoming tunes:</h4>
                 <ol data-role="listview" data-inset="true">
                 </ol>
             </div>
@@ -246,7 +380,7 @@ $("#control-mute").click(function(ev) { player.toggle_mute(); });
     </div><!-- /header -->
 
     <div data-role="content">   
-        <ul data-role="listview" data-filter="true">
+        <ul id="playlist-browser" data-role="listview" data-filter="true">
         </ul>
     </div><!-- /content -->
 
